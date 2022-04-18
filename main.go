@@ -8,6 +8,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"os"
 	"os/exec"
 	"time"
 
@@ -65,8 +66,9 @@ func speedtest(cliPath string) (*speedTestResult, error) {
 	cmd := exec.Command(cliPath, "--json")
 	var out bytes.Buffer
 	cmd.Stdout = &out
+	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("failed to execute speedtest CLI: %w", err)
+		return nil, fmt.Errorf("failed to execute speedtest CLI: %w\nOutput: %s", err, out.String())
 	}
 	var ret speedTestResult
 	if err := json.Unmarshal(out.Bytes(), &ret); err != nil {
