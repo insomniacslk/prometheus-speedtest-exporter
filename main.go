@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"flag"
@@ -8,8 +9,8 @@ import (
 	"log"
 	"net"
 	"net/http"
-	"os"
 	"os/exec"
+	"strings"
 	"time"
 
 	"github.com/insomniacslk/xjson"
@@ -23,6 +24,10 @@ var (
 	flagSpeedTestCLI  = flag.String("s", "speedtest-cli", "Path to speedtest-cli")
 	flagSleepInterval = flag.Duration("i", 30*time.Minute, "Interval between speedtest executions, expressed as a Go duration string")
 )
+
+var errRetryable = fmt.Errorf("speedtest temporarily failed, try again later")
+
+const defaultRetryInterval = 60 * time.Second
 
 type speedTestResult struct {
 	Download      float64
@@ -64,14 +69,37 @@ type serverInfo struct {
 
 func speedtest(cliPath string) (*speedTestResult, error) {
 	cmd := exec.Command(cliPath, "--json")
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("failed to execute speedtest CLI: %w\nOutput: %s", err, out.String())
+	var outb, errb bytes.Buffer
+	cmd.Stdout = &outb
+	cmd.Stderr = &errb
+	if runErr := cmd.Run(); runErr != nil {
+		var (
+			errCode int
+			errMsg  string
+		)
+		errstr := errb.String()
+		outstr := outb.String()
+		scanner := bufio.NewScanner(&errb)
+		for scanner.Scan() {
+			n, err := fmt.Fscanf(strings.NewReader(scanner.Text()), "ERROR: HTTP Error %d: %s\n", &errCode, &errMsg)
+			if err != nil || n != 2 {
+				// not an HTTP error string, ignore
+				continue
+			}
+			// at this point we know there's an HTTP error. If it's 403
+			// Forbidden we know something's being updated on the SpeedTest
+			// side, so we can wait and retry
+			if errCode == 403 {
+				return nil, errRetryable
+			}
+		}
+		if err := scanner.Err(); err != nil {
+			log.Printf("Warning: scanner failed: %w", err)
+		}
+		return nil, fmt.Errorf("failed to execute speedtest CLI: %w\nStdout: %s\nStderr: %s", runErr, outstr, errstr)
 	}
 	var ret speedTestResult
-	if err := json.Unmarshal(out.Bytes(), &ret); err != nil {
+	if err := json.Unmarshal(outb.Bytes(), &ret); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal JSON result: %w", err)
 	}
 	return &ret, nil
@@ -103,6 +131,11 @@ func main() {
 			log.Printf("Running speed test...")
 			res, err := speedtest(*flagSpeedTestCLI)
 			if err != nil {
+				if err == errRetryable {
+					log.Printf("Retryable error, sleeping for %s", defaultRetryInterval)
+					time.Sleep(defaultRetryInterval)
+					continue
+				}
 				log.Printf("ERROR: failed to run speed test: %v", err)
 			} else {
 				// update value
