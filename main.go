@@ -23,6 +23,7 @@ var (
 	flagListen        = flag.String("l", ":9101", "Address to listen to")
 	flagSpeedTestCLI  = flag.String("s", "speedtest-cli", "Path to speedtest-cli")
 	flagSleepInterval = flag.Duration("i", 30*time.Minute, "Interval between speedtest executions, expressed as a Go duration string")
+	flagInsecure      = flag.Bool("I", false, "Insecure mode: use HTTP instead of HTTPS")
 )
 
 var errRetryable = fmt.Errorf("speedtest temporarily failed, try again later")
@@ -67,8 +68,12 @@ type serverInfo struct {
 	Latency float64
 }
 
-func speedtest(cliPath string) (*speedTestResult, error) {
-	cmd := exec.Command(cliPath, "--json")
+func speedtest(cliPath string, insecure bool) (*speedTestResult, error) {
+	args := []string{"--json"}
+	if !insecure {
+		args = append(args, "--secure")
+	}
+	cmd := exec.Command(cliPath, args...)
 	var outb, errb bytes.Buffer
 	cmd.Stdout = &outb
 	cmd.Stderr = &errb
@@ -129,7 +134,7 @@ func main() {
 	go func() {
 		for {
 			log.Printf("Running speed test...")
-			res, err := speedtest(*flagSpeedTestCLI)
+			res, err := speedtest(*flagSpeedTestCLI, *flagInsecure)
 			if err != nil {
 				if err == errRetryable {
 					log.Printf("Retryable error, sleeping for %s", defaultRetryInterval)
