@@ -118,7 +118,7 @@ func main() {
 			Name: "speedtest_speed_bits_per_second",
 			Help: "SpeedTest.net upload and download speed",
 		},
-		[]string{"direction"},
+		[]string{"direction", "client_ip", "client_isp", "client_country", "server_sponsor", "server_host", "server_country"},
 	)
 	speedtestPingGauge := prometheus.NewGauge(prometheus.GaugeOpts{
 		Name: "speedtest_ping_msec",
@@ -144,8 +144,16 @@ func main() {
 				log.Printf("ERROR: failed to run speed test: %v", err)
 			} else {
 				// update value
-				speedtestSpeedGauge.WithLabelValues("upload").Set(res.Upload)
-				speedtestSpeedGauge.WithLabelValues("download").Set(res.Download)
+				speedtestSpeedGauge.WithLabelValues(
+					"upload",
+					res.Client.IP.String(), res.Client.ISP, res.Client.Country,
+					res.Server.Sponsor, res.Server.Host, res.Server.Country,
+				).Set(res.Upload)
+				speedtestSpeedGauge.WithLabelValues(
+					"download",
+					res.Client.IP.String(), res.Client.ISP, res.Client.Country,
+					res.Server.Sponsor, res.Server.Host, res.Server.Country,
+				).Set(res.Download)
 				speedtestPingGauge.Set(res.Ping)
 			}
 			log.Printf("Sleeping %s...", *flagSleepInterval)
