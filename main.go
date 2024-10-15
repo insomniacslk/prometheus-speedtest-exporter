@@ -144,6 +144,7 @@ func main() {
 				log.Printf("ERROR: failed to run speed test: %v", err)
 			} else {
 				// update value
+				speedtestSpeedGauge.Reset()
 				speedtestSpeedGauge.WithLabelValues(
 					"upload",
 					res.Client.IP.String(), res.Client.ISP, res.Client.Country,
