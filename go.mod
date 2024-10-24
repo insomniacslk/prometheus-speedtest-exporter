@@ -7,6 +7,7 @@ toolchain go1.22.1
 require (
 	github.com/insomniacslk/xjson v0.0.0-20240314172816-ab1449dc107f
 	github.com/prometheus/client_golang v1.19.0
+	github.com/sirupsen/logrus v1.9.3
 )
 
 require (

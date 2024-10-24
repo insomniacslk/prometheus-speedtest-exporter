@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"log"
 	"net"
 	"net/http"
 	"os/exec"
@@ -16,6 +15,7 @@ import (
 	"github.com/insomniacslk/xjson"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/sirupsen/logrus"
 )
 
 var (
@@ -24,6 +24,7 @@ var (
 	flagSpeedTestCLI  = flag.String("s", "speedtest-cli", "Path to speedtest-cli")
 	flagSleepInterval = flag.Duration("i", 30*time.Minute, "Interval between speedtest executions, expressed as a Go duration string")
 	flagInsecure      = flag.Bool("I", false, "Insecure mode: use HTTP instead of HTTPS")
+	flagDebug         = flag.Bool("d", false, "Enable debugging output")
 )
 
 var errRetryable = fmt.Errorf("speedtest temporarily failed, try again later")
@@ -77,6 +78,7 @@ func speedtest(cliPath string, insecure bool) (*speedTestResult, error) {
 	var outb, errb bytes.Buffer
 	cmd.Stdout = &outb
 	cmd.Stderr = &errb
+	logrus.Debugf("Executing command %+v", cmd)
 	if runErr := cmd.Run(); runErr != nil {
 		var (
 			errCode int
@@ -99,19 +101,25 @@ func speedtest(cliPath string, insecure bool) (*speedTestResult, error) {
 			}
 		}
 		if err := scanner.Err(); err != nil {
-			log.Printf("Warning: scanner failed: %w", err)
+			logrus.Warning("Text scanner failed: %w", err)
 		}
 		return nil, fmt.Errorf("failed to execute speedtest CLI: %w\nStdout: %s\nStderr: %s", runErr, outstr, errstr)
 	}
+	logrus.Debugf("Raw output: %s", outb.String())
 	var ret speedTestResult
 	if err := json.Unmarshal(outb.Bytes(), &ret); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal JSON result: %w", err)
 	}
+	logrus.Debugf("Speedtest results: %+v", ret)
 	return &ret, nil
 }
 
 func main() {
 	flag.Parse()
+	logrus.SetLevel(logrus.InfoLevel)
+	if *flagDebug {
+		logrus.SetLevel(logrus.DebugLevel)
+	}
 
 	speedtestSpeedGauge := prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
@@ -125,23 +133,23 @@ func main() {
 		Help: "SpeedTest.net ping latency in milliseconds",
 	})
 	if err := prometheus.Register(speedtestSpeedGauge); err != nil {
-		log.Fatalf("Failed to register speedtest speed gauge: %v", err)
+		logrus.Fatalf("Failed to register speedtest speed gauge: %v", err)
 	}
 	if err := prometheus.Register(speedtestPingGauge); err != nil {
-		log.Fatalf("Failed to register speedtest ping gauge: %v", err)
+		logrus.Fatalf("Failed to register speedtest ping gauge: %v", err)
 	}
 
 	go func() {
 		for {
-			log.Printf("Running speed test...")
+			logrus.Infof("Running speed test...")
 			res, err := speedtest(*flagSpeedTestCLI, *flagInsecure)
 			if err != nil {
 				if err == errRetryable {
-					log.Printf("Retryable error, sleeping for %s", defaultRetryInterval)
+					logrus.Warningf("Retryable error, sleeping for %s", defaultRetryInterval)
 					time.Sleep(defaultRetryInterval)
 					continue
 				}
-				log.Printf("ERROR: failed to run speed test: %v", err)
+				logrus.Warningf("Wailed to run speed test: %v", err)
 			} else {
 				// update value
 				speedtestSpeedGauge.Reset()
@@ -157,12 +165,12 @@ func main() {
 				).Set(res.Download)
 				speedtestPingGauge.Set(res.Ping)
 			}
-			log.Printf("Sleeping %s...", *flagSleepInterval)
+			logrus.Infof("Sleeping %s...", *flagSleepInterval)
 			time.Sleep(*flagSleepInterval)
 		}
 	}()
 
 	http.Handle(*flagPath, promhttp.Handler())
-	log.Printf("Starting server on %s", *flagListen)
-	log.Fatal(http.ListenAndServe(*flagListen, nil))
+	logrus.Infof("Starting server on %s", *flagListen)
+	logrus.Fatal(http.ListenAndServe(*flagListen, nil))
 }
