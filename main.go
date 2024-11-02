@@ -19,12 +19,13 @@ import (
 )
 
 var (
-	flagPath          = flag.String("p", "/metrics", "HTTP path where to expose metrics to")
-	flagListen        = flag.String("l", ":9101", "Address to listen to")
-	flagSpeedTestCLI  = flag.String("s", "speedtest-cli", "Path to speedtest-cli")
-	flagSleepInterval = flag.Duration("i", 30*time.Minute, "Interval between speedtest executions, expressed as a Go duration string")
-	flagInsecure      = flag.Bool("I", false, "Insecure mode: use HTTP instead of HTTPS")
-	flagDebug         = flag.Bool("d", false, "Enable debugging output")
+	flagPath              = flag.String("p", "/metrics", "HTTP path where to expose metrics to")
+	flagListen            = flag.String("l", ":9101", "Address to listen to")
+	flagSpeedTestCLI      = flag.String("s", "speedtest-cli", "Path to speedtest-cli")
+	flagSpeedTestServerID = flag.Int("S", 0, "Server ID obtained with `speedtest-cli --list`")
+	flagSleepInterval     = flag.Duration("i", 30*time.Minute, "Interval between speedtest executions, expressed as a Go duration string")
+	flagInsecure          = flag.Bool("I", false, "Insecure mode: use HTTP instead of HTTPS")
+	flagDebug             = flag.Bool("d", false, "Enable debugging output")
 )
 
 var errRetryable = fmt.Errorf("speedtest temporarily failed, try again later")
@@ -69,10 +70,13 @@ type serverInfo struct {
 	Latency float64
 }
 
-func speedtest(cliPath string, insecure bool) (*speedTestResult, error) {
+func speedtest(cliPath string, serverID int, insecure bool) (*speedTestResult, error) {
 	args := []string{"--json"}
 	if !insecure {
 		args = append(args, "--secure")
+	}
+	if serverID != 0 {
+		args = append(args, "--server", fmt.Sprintf("%d", serverID))
 	}
 	cmd := exec.Command(cliPath, args...)
 	var outb, errb bytes.Buffer
@@ -142,7 +146,7 @@ func main() {
 	go func() {
 		for {
 			logrus.Infof("Running speed test...")
-			res, err := speedtest(*flagSpeedTestCLI, *flagInsecure)
+			res, err := speedtest(*flagSpeedTestCLI, *flagSpeedTestServerID, *flagInsecure)
 			if err != nil {
 				if err == errRetryable {
 					logrus.Warningf("Retryable error, sleeping for %s", defaultRetryInterval)
