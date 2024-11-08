@@ -9,6 +9,8 @@ import (
 	"net"
 	"net/http"
 	"os/exec"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -26,6 +28,7 @@ var (
 	flagSleepInterval     = flag.Duration("i", 30*time.Minute, "Interval between speedtest executions, expressed as a Go duration string")
 	flagInsecure          = flag.Bool("I", false, "Insecure mode: use HTTP instead of HTTPS")
 	flagDebug             = flag.Bool("d", false, "Enable debugging output")
+	flagMaxDistance       = flag.Int("m", 0, "Max distance in km to the speedtest server")
 )
 
 var errRetryable = fmt.Errorf("speedtest temporarily failed, try again later")
@@ -70,13 +73,21 @@ type serverInfo struct {
 	Latency float64
 }
 
-func speedtest(cliPath string, serverID int, insecure bool) (*speedTestResult, error) {
+func speedtest(cliPath string, serverIDs []int, insecure bool) (*speedTestResult, error) {
 	args := []string{"--json"}
-	if !insecure {
-		args = append(args, "--secure")
+	usingServerIDs := false
+	for _, serverID := range serverIDs {
+		if serverID != 0 {
+			args = append(args, "--server", fmt.Sprintf("%d", serverID))
+			usingServerIDs = true
+		}
 	}
-	if serverID != 0 {
-		args = append(args, "--server", fmt.Sprintf("%d", serverID))
+	if !insecure {
+		if usingServerIDs {
+			logrus.Warningf("Disabling --secure because it is apparently incompatible with a custom list of servers")
+		} else {
+			args = append(args, "--secure")
+		}
 	}
 	cmd := exec.Command(cliPath, args...)
 	var outb, errb bytes.Buffer
@@ -118,6 +129,81 @@ func speedtest(cliPath string, serverID int, insecure bool) (*speedTestResult, e
 	return &ret, nil
 }
 
+type SpeedtestServer struct {
+	ID         int
+	Name       string
+	DistanceKm int
+}
+
+var serverListRegexp = regexp.MustCompile(`(\d+)\) (.+) [[](\d+\.\d+) km[]]`)
+
+func getClosestServers(cliPath string, insecure bool) ([]SpeedtestServer, error) {
+	args := make([]string, 0)
+	if !insecure {
+		args = append(args, "--secure")
+	}
+	cmd := exec.Command(cliPath, "--list")
+	var outb, errb bytes.Buffer
+	cmd.Stdout = &outb
+	cmd.Stderr = &errb
+	logrus.Debugf("Executing command %+v", cmd)
+	if runErr := cmd.Run(); runErr != nil {
+		var (
+			errCode int
+			errMsg  string
+		)
+		errstr := errb.String()
+		outstr := outb.String()
+		scanner := bufio.NewScanner(&errb)
+		for scanner.Scan() {
+			n, err := fmt.Fscanf(strings.NewReader(scanner.Text()), "ERROR: HTTP Error %d: %s\n", &errCode, &errMsg)
+			if err != nil || n != 2 {
+				// not an HTTP error string, ignore
+				continue
+			}
+			// at this point we know there's an HTTP error. If it's 403
+			// Forbidden we know something's being updated on the SpeedTest
+			// side, so we can wait and retry
+			if errCode == 403 {
+				return nil, errRetryable
+			}
+		}
+		if err := scanner.Err(); err != nil {
+			logrus.Warning("Text scanner failed: %w", err)
+		}
+		return nil, fmt.Errorf("failed to get speedtest's closest servers list: %w\nStdout: %s\nStderr: %s", runErr, outstr, errstr)
+	}
+	scanner := bufio.NewScanner(&outb)
+	servers := make([]SpeedtestServer, 0)
+	for scanner.Scan() {
+		// parse output line. The format is "ServerID) Server Name [123.4 km]
+		line := scanner.Text()
+		logrus.Debugf("Server list line: %s", line)
+		matches := serverListRegexp.FindStringSubmatch(line)
+		logrus.Debugf("Matches: %#+v", matches)
+		if len(matches) != 4 {
+			continue
+		}
+		serverID, err := strconv.ParseInt(matches[1], 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse integer string %q: %v", matches[1], err)
+		}
+		distanceKm, err := strconv.ParseFloat(matches[3], 64)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse integer string %q: %v", matches[3], err)
+		}
+		servers = append(servers, SpeedtestServer{
+			ID:         int(serverID),
+			Name:       matches[2],
+			DistanceKm: int(distanceKm),
+		})
+	}
+	if len(servers) == 0 {
+		return nil, fmt.Errorf("no servers found")
+	}
+	return servers, nil
+}
+
 func main() {
 	flag.Parse()
 	logrus.SetLevel(logrus.InfoLevel)
@@ -145,8 +231,37 @@ func main() {
 
 	go func() {
 		for {
+			serverIDs := make([]int, 0)
+			var (
+				res *speedTestResult
+				err error
+			)
+			if *flagMaxDistance > 0 {
+				logrus.Infof("Looking for servers within %d km", *flagMaxDistance)
+				allServers, err := getClosestServers(*flagSpeedTestCLI, *flagInsecure)
+				if err != nil {
+					logrus.Warningf("Failed to get list of closest servers: %v", err)
+				}
+				logrus.Infof("Found %d servers in total", len(allServers))
+				for _, s := range allServers {
+					if s.DistanceKm <= *flagMaxDistance {
+						serverIDs = append(serverIDs, s.ID)
+					}
+				}
+				if len(serverIDs) == 0 {
+					logrus.Warningf("No server found within %d km", *flagMaxDistance)
+					goto sleep
+				}
+			} else {
+				if *flagSpeedTestServerID != 0 {
+					logrus.Infof("Using server ID %d", *flagSpeedTestServerID)
+					serverIDs = []int{*flagSpeedTestServerID}
+				} else {
+					logrus.Infof("Using random server")
+				}
+			}
 			logrus.Infof("Running speed test...")
-			res, err := speedtest(*flagSpeedTestCLI, *flagSpeedTestServerID, *flagInsecure)
+			res, err = speedtest(*flagSpeedTestCLI, serverIDs, *flagInsecure)
 			if err != nil {
 				if err == errRetryable {
 					logrus.Warningf("Retryable error, sleeping for %s", defaultRetryInterval)
@@ -169,6 +284,7 @@ func main() {
 				).Set(res.Download)
 				speedtestPingGauge.Set(res.Ping)
 			}
+		sleep:
 			logrus.Infof("Sleeping %s...", *flagSleepInterval)
 			time.Sleep(*flagSleepInterval)
 		}
