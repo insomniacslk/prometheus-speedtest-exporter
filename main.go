@@ -26,6 +26,7 @@ var (
 	flagSpeedTestCLI      = flag.String("s", "speedtest-cli", "Path to speedtest-cli")
 	flagSpeedTestServerID = flag.Int("S", 0, "Server ID obtained with `speedtest-cli --list`")
 	flagSleepInterval     = flag.Duration("i", 30*time.Minute, "Interval between speedtest executions, expressed as a Go duration string")
+	flagRetryInterval     = flag.Duration("r", 1*time.Minute, "Interval between retries when `speedtest --list` fails to find a server, expressed as a Go duration string")
 	flagInsecure          = flag.Bool("I", false, "Insecure mode: use HTTP instead of HTTPS")
 	flagDebug             = flag.Bool("d", false, "Enable debugging output")
 	flagMaxDistance       = flag.Int("m", 0, "Max distance in km to the speedtest server")
@@ -262,7 +263,9 @@ func main() {
 				if err != nil {
 					logrus.Warningf("Failed to get list of closest servers: %v", err)
 					setError(*speedtestSpeedGauge, speedtestPingGauge)
-					goto sleep
+					logrus.Infof("Sleeping %s before retrying to get server list...", *flagRetryInterval)
+					time.Sleep(*flagRetryInterval)
+					continue
 				}
 				logrus.Infof("Found %d servers in total", len(allServers))
 				for _, s := range allServers {
@@ -273,7 +276,9 @@ func main() {
 				if len(serverIDs) == 0 {
 					logrus.Warningf("No server found within %d km", *flagMaxDistance)
 					setError(*speedtestSpeedGauge, speedtestPingGauge)
-					goto sleep
+					logrus.Infof("Sleeping %s before retrying to get server list...", *flagRetryInterval)
+					time.Sleep(*flagRetryInterval)
+					continue
 				}
 			} else {
 				if *flagSpeedTestServerID != 0 {
@@ -307,7 +312,6 @@ func main() {
 				).Set(res.Download)
 				speedtestPingGauge.Set(res.Ping)
 			}
-		sleep:
 			logrus.Infof("Sleeping %s...", *flagSleepInterval)
 			time.Sleep(*flagSleepInterval)
 		}
