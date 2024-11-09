@@ -138,11 +138,11 @@ type SpeedtestServer struct {
 var serverListRegexp = regexp.MustCompile(`(\d+)\) (.+) [[](\d+\.\d+) km[]]`)
 
 func getClosestServers(cliPath string, insecure bool) ([]SpeedtestServer, error) {
-	args := make([]string, 0)
+	args := []string{"--list"}
 	if !insecure {
 		args = append(args, "--secure")
 	}
-	cmd := exec.Command(cliPath, "--list")
+	cmd := exec.Command(cliPath, args...)
 	var outb, errb bytes.Buffer
 	cmd.Stdout = &outb
 	cmd.Stderr = &errb
@@ -204,6 +204,26 @@ func getClosestServers(cliPath string, insecure bool) ([]SpeedtestServer, error)
 	return servers, nil
 }
 
+func setError(speedtestSpeedGauge prometheus.GaugeVec, speedtestPingGauge prometheus.Gauge) {
+	// update value
+	speedtestSpeedGauge.Reset()
+	speedtestSpeedGauge.WithLabelValues(
+		"upload",
+		// client ip, client isp, client country
+		"", "", "",
+		// server sponsor, server host, server country
+		"", "", "",
+	).Set(0)
+	speedtestSpeedGauge.WithLabelValues(
+		"download",
+		// client ip, client isp, client country
+		"", "", "",
+		// server sponsor, server host, server country
+		"", "", "",
+	).Set(0)
+	speedtestPingGauge.Set(0)
+}
+
 func main() {
 	flag.Parse()
 	logrus.SetLevel(logrus.InfoLevel)
@@ -241,6 +261,8 @@ func main() {
 				allServers, err := getClosestServers(*flagSpeedTestCLI, *flagInsecure)
 				if err != nil {
 					logrus.Warningf("Failed to get list of closest servers: %v", err)
+					setError(*speedtestSpeedGauge, speedtestPingGauge)
+					goto sleep
 				}
 				logrus.Infof("Found %d servers in total", len(allServers))
 				for _, s := range allServers {
@@ -250,6 +272,7 @@ func main() {
 				}
 				if len(serverIDs) == 0 {
 					logrus.Warningf("No server found within %d km", *flagMaxDistance)
+					setError(*speedtestSpeedGauge, speedtestPingGauge)
 					goto sleep
 				}
 			} else {
